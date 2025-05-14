@@ -22,7 +22,7 @@ fn main() {
         let mut res = winres::WindowsResource::new();
 
         // Embed tray_dark.ico as the executable icon
-        res.set_icon("tray_dark.ico");
+        res.set_icon("app.ico");
 
         // Set Windows version info
         res.set("FileDescription", "Schedulatte - Caffeine Scheduler");
