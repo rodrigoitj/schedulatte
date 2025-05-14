@@ -286,8 +286,9 @@ fn run_message_loop() {
             None,
         );
 
-        if let Err(e) = create_tray_icon(hwnd) {
-            eprintln!("Failed to create tray icon: {}", e);
+        if let Err(_e) = create_tray_icon(hwnd) {
+            #[cfg(debug_assertions)]
+            eprintln!("Failed to create tray icon: {}", _e);
             return;
         }
 
@@ -313,7 +314,10 @@ fn run_message_loop() {
 
 #[tokio::main]
 async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
+    // Only print to console in debug mode
+    #[cfg(debug_assertions)]
     println!("=== Schedulatte Started ===");
+    #[cfg(debug_assertions)]
     println!("Loading configuration...");
 
     let config = load_config("config.ini")?;
@@ -330,29 +334,33 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         run_message_loop();
     });
 
-    println!("Configuration loaded successfully:");
-    let state = TRAY_STATE.lock().unwrap();
-    let config = state.config.as_ref().unwrap();
-    println!(
-        "  Morning: {:02}:{:02} - {:02}:{:02}",
-        config.morning.start.hour(),
-        config.morning.start.minute(),
-        config.morning.end.hour(),
-        config.morning.end.minute()
-    );
-    println!(
-        "  Afternoon: {:02}:{:02} - {:02}:{:02}",
-        config.afternoon.start.hour(),
-        config.afternoon.start.minute(),
-        config.afternoon.end.hour(),
-        config.afternoon.end.minute()
-    );
-    drop(state);
+    // Only print to console in debug mode
+    #[cfg(debug_assertions)]
+    {
+        println!("Configuration loaded successfully:");
+        let state = TRAY_STATE.lock().unwrap();
+        let config = state.config.as_ref().unwrap();
+        println!(
+            "  Morning: {:02}:{:02} - {:02}:{:02}",
+            config.morning.start.hour(),
+            config.morning.start.minute(),
+            config.morning.end.hour(),
+            config.morning.end.minute()
+        );
+        println!(
+            "  Afternoon: {:02}:{:02} - {:02}:{:02}",
+            config.afternoon.start.hour(),
+            config.afternoon.start.minute(),
+            config.afternoon.end.hour(),
+            config.afternoon.end.minute()
+        );
+        drop(state);
 
-    println!("Using executable: {}", caffeine_exe);
-    println!("Starting monitoring (checking every 10 minutes)...");
-    println!("System tray icon created. Right-click for menu.");
-    println!("Press Ctrl+C to stop gracefully\n");
+        println!("Using executable: {}", caffeine_exe);
+        println!("Starting monitoring (checking every 10 minutes)...");
+        println!("System tray icon created. Right-click for menu.");
+        println!("Press Ctrl+C to stop gracefully\n");
+    }
 
     let mut check_interval = interval(Duration::from_secs(600)); // 10 minutes
     let mut exit_check_interval = interval(Duration::from_millis(100)); // Check exit every 100ms
@@ -370,6 +378,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             _ = check_interval.tick() => {
                 let state = TRAY_STATE.lock().unwrap();
                 if state.should_exit {
+                    #[cfg(debug_assertions)]
                     println!("Exit requested from tray menu");
                     break;
                 }
@@ -380,32 +389,39 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             _ = exit_check_interval.tick() => {
                 let state = TRAY_STATE.lock().unwrap();
                 if state.should_exit {
+                    #[cfg(debug_assertions)]
                     println!("Exit requested from tray menu");
                     break;
                 }
                 drop(state);
             }
             _ = signal::ctrl_c() => {
+                #[cfg(debug_assertions)]
                 println!("\n=== Shutdown Signal Received ===");
                 break;
             }
         }
     }
 
+    #[cfg(debug_assertions)]
     println!("Stopping Schedulatte gracefully...");
     if is_caffeine_running() {
+        #[cfg(debug_assertions)]
         println!("Stopping caffeine before exit...");
         kill_caffeine();
     }
+    #[cfg(debug_assertions)]
     println!("Schedulatte stopped.");
 
     Ok(())
 }
 
 fn load_config(path: &str) -> std::result::Result<Config, Box<dyn std::error::Error>> {
+    #[cfg(debug_assertions)]
     println!("Reading config file: {}", path);
     let mut config = Ini::new();
     config.load(path).map_err(|e| {
+        #[cfg(debug_assertions)]
         eprintln!("Error loading config file: {}", e);
         e
     })?;
@@ -421,6 +437,7 @@ fn load_config(path: &str) -> std::result::Result<Config, Box<dyn std::error::Er
         .get("afternoon", "end")
         .ok_or("Missing afternoon end")?;
 
+    #[cfg(debug_assertions)]
     println!("Parsing time ranges...");
     let morning = parse_time_range(&morning_start, &morning_end)?;
     let afternoon = parse_time_range(&afternoon_start, &afternoon_end)?;
@@ -467,50 +484,68 @@ fn is_caffeine_running() -> bool {
 
     let running = !found_processes.is_empty();
 
-    if running {
-        println!("  Found {} caffeine process(es):", found_processes.len());
-        for (pid, name) in found_processes {
-            println!("    - {} (PID: {})", name, pid);
+    #[cfg(debug_assertions)]
+    {
+        if running {
+            println!("  Found {} caffeine process(es):", found_processes.len());
+            for (pid, name) in found_processes {
+                println!("    - {} (PID: {})", name, pid);
+            }
+        } else {
+            println!("  No caffeine processes found");
         }
-    } else {
-        println!("  No caffeine processes found");
     }
 
     running
 }
 
 fn start_caffeine(executable: &str) {
+    #[cfg(debug_assertions)]
     println!("  Attempting to start {}", executable);
     match Command::new(executable).spawn() {
-        Ok(_) => println!("  ✓ Caffeine started successfully"),
-        Err(e) => eprintln!("  ✗ Failed to start caffeine: {}", e),
+        Ok(_) => {
+            #[cfg(debug_assertions)]
+            println!("  ✓ Caffeine started successfully")
+        }
+        Err(_e) => {
+            #[cfg(debug_assertions)]
+            eprintln!("  ✗ Failed to start caffeine: {}", _e)
+        }
     }
 }
 
 fn kill_caffeine() {
+    #[cfg(debug_assertions)]
     println!("  Searching for caffeine processes to terminate...");
     let mut system = System::new_all();
     system.refresh_processes();
 
-    let mut found_processes = false;
-    for (pid, process) in system.processes() {
+    #[cfg(debug_assertions)]
+    let mut found = false;
+    for (_pid, process) in system.processes() {
         let name = process.name().to_lowercase();
         if name == "caffeine32.exe" || name == "caffeine64.exe" || name == "caffeine.exe" {
-            found_processes = true;
-            println!(
-                "  Found caffeine process: {} (PID: {})",
-                process.name(),
-                pid
-            );
+            #[cfg(debug_assertions)]
+            {
+                found = true;
+                println!(
+                    "  Found caffeine process: {} (PID: {})",
+                    process.name(),
+                    _pid
+                );
+            }
             if !process.kill() {
-                eprintln!("  ✗ Failed to kill caffeine process {}", pid);
+                #[cfg(debug_assertions)]
+                eprintln!("  ✗ Failed to kill caffeine process {}", _pid);
             } else {
-                println!("  ✓ Killed caffeine process {}", pid);
+                #[cfg(debug_assertions)]
+                println!("  ✓ Killed caffeine process {}", _pid);
             }
         }
     }
 
-    if !found_processes {
+    #[cfg(debug_assertions)]
+    if !found {
         println!("  No caffeine processes found to kill");
     }
 }
@@ -520,26 +555,34 @@ async fn check_and_manage_caffeine(config: &Config, caffeine_exe: &str) {
     let should_run = is_in_schedule(config, now);
     let is_running = is_caffeine_running();
 
-    println!("=== Status Check at {} ===", now.format("%H:%M:%S"));
-    println!("  Should caffeine be running: {}", should_run);
-    println!("  Caffeine currently running: {}", is_running);
+    #[cfg(debug_assertions)]
+    {
+        println!("=== Status Check at {} ===", now.format("%H:%M:%S"));
+        println!("  Should caffeine be running: {}", should_run);
+        println!("  Caffeine currently running: {}", is_running);
+    }
 
     match (should_run, is_running) {
         (true, false) => {
+            #[cfg(debug_assertions)]
             println!("  Action: Starting caffeine");
             start_caffeine(caffeine_exe);
         }
         (false, true) => {
+            #[cfg(debug_assertions)]
             println!("  Action: Stopping caffeine");
             kill_caffeine();
         }
         (true, true) => {
+            #[cfg(debug_assertions)]
             println!("  Action: No action needed (already running)");
         }
         (false, false) => {
+            #[cfg(debug_assertions)]
             println!("  Action: No action needed (not scheduled)");
         }
     }
 
+    #[cfg(debug_assertions)]
     println!("  Next check in 10 minutes\n");
 }
