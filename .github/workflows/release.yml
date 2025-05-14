@@ -5,11 +5,17 @@ on:
     types: [closed]
     branches:
       - main
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release (leave empty to use version from Cargo.toml)"
+        required: false
+        default: ""
 
 jobs:
   build_and_release:
     name: Build and Release
-    if: github.event.pull_request.merged == true
+    if: github.event.pull_request.merged == true || github.event_name == 'workflow_dispatch'
     runs-on: windows-latest
 
     steps:
@@ -27,6 +33,9 @@ jobs:
         id: extract_version
         run: |
           $version = (Select-String -Path Cargo.toml -Pattern 'version = "(.*)"').Matches.Groups[1].Value
+          if ("${{ github.event.inputs.version }}" -ne "") {
+            $version = "${{ github.event.inputs.version }}"
+          }
           echo "VERSION=$version" >> $env:GITHUB_OUTPUT
 
       - name: Build for release
