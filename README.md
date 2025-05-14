@@ -27,7 +27,7 @@ Schedulatte monitors your system and automatically:
 
 ## Installation
 
-1. Download or build the espresso executable
+1. Download or build the schedulatte executable
 2. Place it in a directory of your choice
 3. Download Caffeine executables and place them in the same directory
 4. Create your `config.ini` file
@@ -96,7 +96,7 @@ cargo run
 cargo build --release
 
 # Run the executable
-./target/release/espresso.exe
+./target/release/schedulatte.exe
 ```
 
 ### Stopping the Application
