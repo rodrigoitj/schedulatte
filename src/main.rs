@@ -173,49 +173,78 @@ fn is_dark_theme() -> bool {
 
 fn create_tray_icon(hwnd: HWND) -> std::result::Result<(), Box<dyn std::error::Error>> {
     unsafe {
+        // Get the current executable's directory
+        let mut buffer = [0u16; 260]; // MAX_PATH
+        let len = GetModuleFileNameW(None, &mut buffer);
+        let exe_path = String::from_utf16_lossy(&buffer[..len as usize]);
+        let exe_dir = std::path::Path::new(&exe_path)
+            .parent()
+            .unwrap_or(std::path::Path::new(""))
+            .to_string_lossy()
+            .to_string();
+
+        #[cfg(debug_assertions)]
+        println!("Executable directory: {}", exe_dir);
+
         // Load custom icon based on theme
         let h_instance = GetModuleHandleW(None)?;
-        let icon_path = if is_dark_theme() {
-            w!("tray_dark.ico") // Dark theme icon (light colored for visibility)
+
+        // Determine icon paths - try both relative and absolute
+        let icon_name = if is_dark_theme() {
+            "tray_dark.ico" // Dark theme icon
         } else {
-            w!("tray_light.ico") // Light theme icon (dark colored for visibility)
+            "tray_light.ico" // Light theme icon
         };
 
-        let h_icon = LoadImageW(
+        // Try different paths to find the icon
+        let relative_path = HSTRING::from(icon_name);
+        let abs_path = HSTRING::from(format!("{}\\{}", exe_dir, icon_name));
+
+        #[cfg(debug_assertions)]
+        {
+            println!(
+                "Using theme: {}",
+                if is_dark_theme() { "dark" } else { "light" }
+            );
+            println!("Trying icon paths:");
+            println!("  - Relative: {}", icon_name);
+            println!("  - Absolute: {}", abs_path);
+        }
+
+        // Try loading the icon from different locations
+        let mut h_icon = LoadImageW(
             h_instance,
-            icon_path,
+            &relative_path,
             IMAGE_ICON,
             0,
             0,
             LR_LOADFROMFILE | LR_DEFAULTSIZE,
         );
 
-        // If custom icon fails, fall back to default
-        let h_icon = if let Ok(icon) = h_icon {
-            HICON(icon.0)
-        } else {
-            // Try the other icon as fallback
-            let fallback_icon_path = if is_dark_theme() {
-                w!("tray_light.ico")
-            } else {
-                w!("tray_dark.ico")
-            };
+        // If relative path fails, try absolute path
+        if h_icon.is_err() {
+            #[cfg(debug_assertions)]
+            println!("Relative path failed, trying absolute path");
 
-            let fallback_icon = LoadImageW(
+            h_icon = LoadImageW(
                 h_instance,
-                fallback_icon_path,
+                &abs_path,
                 IMAGE_ICON,
                 0,
                 0,
                 LR_LOADFROMFILE | LR_DEFAULTSIZE,
             );
+        }
 
-            if let Ok(icon) = fallback_icon {
-                HICON(icon.0)
-            } else {
-                // Last resort: use system icon
-                LoadIconW(HINSTANCE::default(), IDI_APPLICATION)?
-            }
+        // Choose the icon to use
+        let h_icon = if let Ok(icon) = h_icon {
+            #[cfg(debug_assertions)]
+            println!("Successfully loaded custom icon");
+            HICON(icon.0)
+        } else {
+            #[cfg(debug_assertions)]
+            println!("Failed to load custom icon, using system default");
+            LoadIconW(HINSTANCE::default(), IDI_APPLICATION)?
         };
 
         let mut nid = NOTIFYICONDATAW {
