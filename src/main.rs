@@ -1,10 +1,19 @@
 use chrono::{Local, NaiveTime, Timelike};
 use configparser::ini::Ini;
+use once_cell::sync::Lazy;
 use std::process::Command;
+use std::sync::{Arc, Mutex};
+use std::thread;
 use std::time::Duration;
 use sysinfo::System;
 use tokio::signal;
 use tokio::time::interval;
+use windows::core::*;
+use windows::Win32::Foundation::*;
+use windows::Win32::System::LibraryLoader::*;
+use windows::Win32::System::Registry::*;
+use windows::Win32::UI::Shell::*;
+use windows::Win32::UI::WindowsAndMessaging::*;
 
 struct TimeRange {
     start: NaiveTime,
@@ -16,15 +25,314 @@ struct Config {
     afternoon: TimeRange,
 }
 
+// Global state for tray
+static TRAY_STATE: Lazy<Arc<Mutex<TrayState>>> = Lazy::new(|| {
+    Arc::new(Mutex::new(TrayState {
+        config: None,
+        should_exit: false,
+    }))
+});
+
+struct TrayState {
+    config: Option<Config>,
+    should_exit: bool,
+}
+
+const WM_USER_TRAY: u32 = WM_USER + 1;
+const ID_TRAY_EXIT: u32 = 1001;
+
+// Windows Registry Keys for theme detection
+const PERSONALIZE_PATH: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize";
+const APPS_USE_LIGHT_THEME: &str = "AppsUseLightTheme";
+
+unsafe extern "system" fn wnd_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    match msg {
+        WM_USER_TRAY => {
+            if lparam.0 as u32 == WM_RBUTTONUP {
+                show_context_menu(hwnd);
+            }
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
+        WM_COMMAND => {
+            let cmd = (wparam.0 & 0xFFFF) as u32;
+            if cmd == ID_TRAY_EXIT {
+                let mut state = TRAY_STATE.lock().unwrap();
+                state.should_exit = true;
+                PostQuitMessage(0);
+            }
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
+        WM_DESTROY => {
+            PostQuitMessage(0);
+            LRESULT(0)
+        }
+        _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+    }
+}
+
+unsafe fn show_context_menu(hwnd: HWND) {
+    let hmenu = CreatePopupMenu().unwrap();
+
+    let state = TRAY_STATE.lock().unwrap();
+    if let Some(ref config) = state.config {
+        // Add schedule info
+        let morning_text = format!(
+            "Morning: {:02}:{:02} - {:02}:{:02}",
+            config.morning.start.hour(),
+            config.morning.start.minute(),
+            config.morning.end.hour(),
+            config.morning.end.minute()
+        );
+        let afternoon_text = format!(
+            "Afternoon: {:02}:{:02} - {:02}:{:02}",
+            config.afternoon.start.hour(),
+            config.afternoon.start.minute(),
+            config.afternoon.end.hour(),
+            config.afternoon.end.minute()
+        );
+        let caffeine_text = format!(
+            "Caffeine: {}",
+            if is_caffeine_running() {
+                "Active"
+            } else {
+                "Inactive"
+            }
+        );
+
+        let _ = AppendMenuW(
+            hmenu,
+            MF_STRING | MF_GRAYED,
+            0,
+            &HSTRING::from(morning_text),
+        );
+        let _ = AppendMenuW(
+            hmenu,
+            MF_STRING | MF_GRAYED,
+            0,
+            &HSTRING::from(afternoon_text),
+        );
+        let _ = AppendMenuW(
+            hmenu,
+            MF_STRING | MF_GRAYED,
+            0,
+            &HSTRING::from(caffeine_text),
+        );
+        let _ = AppendMenuW(hmenu, MF_SEPARATOR, 0, PCWSTR::null());
+    }
+    drop(state);
+
+    let _ = AppendMenuW(hmenu, MF_STRING, ID_TRAY_EXIT as usize, w!("Exit"));
+
+    let mut pt = POINT::default();
+    let _ = GetCursorPos(&mut pt);
+    SetForegroundWindow(hwnd);
+    TrackPopupMenu(hmenu, TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, None);
+    let _ = DestroyMenu(hmenu);
+}
+
+fn is_dark_theme() -> bool {
+    unsafe {
+        let mut hkey = HKEY::default();
+        let personalize_path = HSTRING::from(PERSONALIZE_PATH);
+
+        // Open the Registry key
+        if RegOpenKeyExW(HKEY_CURRENT_USER, &personalize_path, 0, KEY_READ, &mut hkey).is_err() {
+            return false; // Default to light theme if registry access fails
+        }
+
+        // Read the value
+        let mut buffer = [0u8; 4];
+        let mut size = buffer.len() as u32;
+        let mut type_val = REG_VALUE_TYPE::default();
+
+        let result = RegQueryValueExW(
+            hkey,
+            &HSTRING::from(APPS_USE_LIGHT_THEME),
+            None,
+            Some(&mut type_val),
+            Some(buffer.as_mut_ptr()),
+            Some(&mut size),
+        );
+
+        // Close key
+        let _ = RegCloseKey(hkey);
+
+        if result.is_err() || type_val != REG_DWORD {
+            return false; // Default to light theme if value read fails
+        }
+
+        // AppsUseLightTheme = 0 means dark theme is active
+        u32::from_ne_bytes(buffer) == 0
+    }
+}
+
+fn create_tray_icon(hwnd: HWND) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    unsafe {
+        // Load custom icon based on theme
+        let h_instance = GetModuleHandleW(None)?;
+        let icon_path = if is_dark_theme() {
+            w!("tray_dark.ico") // Dark theme icon (light colored for visibility)
+        } else {
+            w!("tray_light.ico") // Light theme icon (dark colored for visibility)
+        };
+
+        let h_icon = LoadImageW(
+            h_instance,
+            icon_path,
+            IMAGE_ICON,
+            0,
+            0,
+            LR_LOADFROMFILE | LR_DEFAULTSIZE,
+        );
+
+        // If custom icon fails, fall back to default
+        let h_icon = if let Ok(icon) = h_icon {
+            HICON(icon.0)
+        } else {
+            // Try the other icon as fallback
+            let fallback_icon_path = if is_dark_theme() {
+                w!("tray_light.ico")
+            } else {
+                w!("tray_dark.ico")
+            };
+
+            let fallback_icon = LoadImageW(
+                h_instance,
+                fallback_icon_path,
+                IMAGE_ICON,
+                0,
+                0,
+                LR_LOADFROMFILE | LR_DEFAULTSIZE,
+            );
+
+            if let Ok(icon) = fallback_icon {
+                HICON(icon.0)
+            } else {
+                // Last resort: use system icon
+                LoadIconW(HINSTANCE::default(), IDI_APPLICATION)?
+            }
+        };
+
+        let mut nid = NOTIFYICONDATAW {
+            cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
+            hWnd: hwnd,
+            uID: 1,
+            uFlags: NIF_ICON | NIF_MESSAGE | NIF_TIP,
+            uCallbackMessage: WM_USER_TRAY,
+            hIcon: h_icon,
+            ..Default::default()
+        };
+
+        let tooltip = "Schedulatte - Caffeine Scheduler";
+        let tooltip_wide: Vec<u16> = tooltip.encode_utf16().collect();
+        let len = tooltip_wide.len().min(127);
+        nid.szTip[..len].copy_from_slice(&tooltip_wide[..len]);
+
+        let result = Shell_NotifyIconW(NIM_ADD, &nid);
+        if !result.as_bool() {
+            return Err("Failed to create tray icon".into());
+        }
+        Ok(())
+    }
+}
+
+fn destroy_tray_icon(hwnd: HWND) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    unsafe {
+        let nid = NOTIFYICONDATAW {
+            cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
+            hWnd: hwnd,
+            uID: 1,
+            ..Default::default()
+        };
+        let result = Shell_NotifyIconW(NIM_DELETE, &nid);
+        if !result.as_bool() {
+            return Err("Failed to destroy tray icon".into());
+        }
+        Ok(())
+    }
+}
+
+fn run_message_loop() {
+    unsafe {
+        let instance = GetModuleHandleW(None).unwrap();
+        let class_name = w!("SchedulatteTrayClass");
+
+        let wc = WNDCLASSW {
+            lpfnWndProc: Some(wnd_proc),
+            hInstance: instance.into(),
+            lpszClassName: class_name,
+            ..Default::default()
+        };
+
+        RegisterClassW(&wc);
+
+        let hwnd = CreateWindowExW(
+            WINDOW_EX_STYLE::default(),
+            class_name,
+            w!("Schedulatte"),
+            WINDOW_STYLE::default(),
+            0,
+            0,
+            0,
+            0,
+            None,
+            None,
+            instance,
+            None,
+        );
+
+        if let Err(e) = create_tray_icon(hwnd) {
+            eprintln!("Failed to create tray icon: {}", e);
+            return;
+        }
+
+        let mut msg = MSG::default();
+        loop {
+            let state = TRAY_STATE.lock().unwrap();
+            if state.should_exit {
+                break;
+            }
+            drop(state);
+
+            if PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
+                TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+            thread::sleep(Duration::from_millis(600));
+        }
+
+        destroy_tray_icon(hwnd).ok();
+        let _ = UnregisterClassW(class_name, instance);
+    }
+}
+
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     println!("=== Schedulatte Started ===");
     println!("Loading configuration...");
 
     let config = load_config("config.ini")?;
     let caffeine_exe = get_caffeine_executable();
 
+    // Set config in global state
+    {
+        let mut state = TRAY_STATE.lock().unwrap();
+        state.config = Some(config);
+    }
+
+    // Start tray icon in separate thread
+    thread::spawn(|| {
+        run_message_loop();
+    });
+
     println!("Configuration loaded successfully:");
+    let state = TRAY_STATE.lock().unwrap();
+    let config = state.config.as_ref().unwrap();
     println!(
         "  Morning: {:02}:{:02} - {:02}:{:02}",
         config.morning.start.hour(),
@@ -39,69 +347,62 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.afternoon.end.hour(),
         config.afternoon.end.minute()
     );
+    drop(state);
+
     println!("Using executable: {}", caffeine_exe);
     println!("Starting monitoring (checking every 10 minutes)...");
+    println!("System tray icon created. Right-click for menu.");
     println!("Press Ctrl+C to stop gracefully\n");
-    println!("Schedulatte is running in system tray (console shows status)");
 
-    let mut interval = interval(Duration::from_secs(600)); // 10 minutes
+    let mut check_interval = interval(Duration::from_secs(600)); // 10 minutes
+    let mut exit_check_interval = interval(Duration::from_millis(100)); // Check exit every 100ms
 
     // Perform initial check
-    check_and_manage_caffeine(&config, &caffeine_exe).await;
-    print_status(&config);
+    {
+        let state = TRAY_STATE.lock().unwrap();
+        let config = state.config.as_ref().unwrap();
+        check_and_manage_caffeine(config, &caffeine_exe).await;
+        drop(state);
+    }
 
     loop {
         tokio::select! {
-            _ = interval.tick() => {
-                check_and_manage_caffeine(&config, &caffeine_exe).await;
-                print_status(&config);
+            _ = check_interval.tick() => {
+                let state = TRAY_STATE.lock().unwrap();
+                if state.should_exit {
+                    println!("Exit requested from tray menu");
+                    break;
+                }
+                let config = state.config.as_ref().unwrap();
+                check_and_manage_caffeine(config, &caffeine_exe).await;
+                drop(state);
+            }
+            _ = exit_check_interval.tick() => {
+                let state = TRAY_STATE.lock().unwrap();
+                if state.should_exit {
+                    println!("Exit requested from tray menu");
+                    break;
+                }
+                drop(state);
             }
             _ = signal::ctrl_c() => {
                 println!("\n=== Shutdown Signal Received ===");
-                println!("Stopping Schedulatte gracefully...");
-
-                if is_caffeine_running() {
-                    println!("Stopping caffeine before exit...");
-                    kill_caffeine();
-                }
-
-                println!("Schedulatte stopped.");
                 break;
             }
         }
     }
 
+    println!("Stopping Schedulatte gracefully...");
+    if is_caffeine_running() {
+        println!("Stopping caffeine before exit...");
+        kill_caffeine();
+    }
+    println!("Schedulatte stopped.");
+
     Ok(())
 }
 
-fn print_status(config: &Config) {
-    println!("=== Current Configuration ===");
-    println!(
-        "Morning: {:02}:{:02} - {:02}:{:02}",
-        config.morning.start.hour(),
-        config.morning.start.minute(),
-        config.morning.end.hour(),
-        config.morning.end.minute()
-    );
-    println!(
-        "Afternoon: {:02}:{:02} - {:02}:{:02}",
-        config.afternoon.start.hour(),
-        config.afternoon.start.minute(),
-        config.afternoon.end.hour(),
-        config.afternoon.end.minute()
-    );
-    println!(
-        "Caffeine: {}",
-        if is_caffeine_running() {
-            "Active"
-        } else {
-            "Inactive"
-        }
-    );
-    println!("============================\n");
-}
-
-fn load_config(path: &str) -> Result<Config, Box<dyn std::error::Error>> {
+fn load_config(path: &str) -> std::result::Result<Config, Box<dyn std::error::Error>> {
     println!("Reading config file: {}", path);
     let mut config = Ini::new();
     config.load(path).map_err(|e| {
@@ -130,7 +431,7 @@ fn load_config(path: &str) -> Result<Config, Box<dyn std::error::Error>> {
 fn parse_time_range(
     start_str: &str,
     end_str: &str,
-) -> Result<TimeRange, Box<dyn std::error::Error>> {
+) -> std::result::Result<TimeRange, Box<dyn std::error::Error>> {
     let start = NaiveTime::parse_from_str(start_str, "%H:%M")?;
     let end = NaiveTime::parse_from_str(end_str, "%H:%M")?;
     Ok(TimeRange { start, end })
