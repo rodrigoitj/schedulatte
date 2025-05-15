@@ -2,6 +2,10 @@
 
 A Rust-based application that automatically manages the Caffeine keep-awake utility based on configurable time schedules.
 
+## Disclaimer
+
+I know that now caffeine has an `-activeperiods` flag, which makes this app completely pointless, but this was a nice way of studying Rust for me 😁
+
 ## What it does
 
 Schedulatte monitors your system and automatically:
